@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Easy WebRTC + Firebase Demo</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 18px; }
+    video { width: 320px; height: 240px; background: #000; }
+    input { padding: 6px; }
+    button { padding: 6px 10px; margin-left:6px; }
+  </style>
+</head>
+<body>
+  <h2>📞 Easy WebRTC + Firebase</h2>
+
+  <div>
+    <button id="createBtn">Create Room</button>
+    <input id="roomInput" placeholder="Enter Room ID" />
+    <button id="joinBtn">Join Room</button>
+  </div>
+
+  <h3>Local</h3>
+  <video id="localVideo" autoplay playsinline muted></video>
+
+  <h3>Remote</h3>
+  <video id="remoteVideo" autoplay playsinline></video>
+
+  <!-- Firebase SDK (must be before app script) -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+  <script>
+    // --- Replace this config only if you want to use a different Firebase project ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyAdeULQohD2xuijI5NZ8s7MhmU8F1a9RTY",
+      authDomain: "webrtc-20ffd.firebaseapp.com",
+      databaseURL: "https://webrtc-20ffd-default-rtdb.firebaseio.com",
+      projectId: "webrtc-20ffd",
+      storageBucket: "webrtc-20ffd.appspot.com",
+      messagingSenderId: "987455049621",
+      appId: "1:987455049621:web:27af7a10884e234919f09c"
+    };
+    // -------------------------------------------------------------------------------
+
+    // initialize Firebase + DB ref
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // UI elements
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+    const createBtn = document.getElementById("createBtn");
+    const joinBtn = document.getElementById("joinBtn");
+    const roomInput = document.getElementById("roomInput");
+
+    // WebRTC state
+    let localStream = null;
+    let pc = null;
+    const servers = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+    // Start local media
+    async function startLocal() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = localStream;
+      } catch (err) {
+        alert("Allow camera/microphone and reload. Error: " + err.message);
+      }
+    }
+    startLocal();
+
+    // Create room (caller)
+    createBtn.onclick = async () => {
+      if (!localStream) return alert("Local media not ready.");
+      const roomRef = db.ref("rooms").push();
+      const roomId = roomRef.key;
+      alert("Room created — share this ID: " + roomId);
+
+      pc = new RTCPeerConnection(servers);
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      pc.ontrack = e => remoteVideo.srcObject = e.streams[0];
+
+      const callerCandidatesRef = roomRef.child("callerCandidates");
+      pc.onicecandidate = e => { if (e.candidate) callerCandidatesRef.push(e.candidate.toJSON()); };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await roomRef.set({ offer: pc.localDescription.toJSON() });
+
+      // wait for answer
+      roomRef.child("answer").on("value", async snap => {
+        const data = snap.val();
+        if (!data) return;
+        if (data.type && data.sdp && !pc.currentRemoteDescription) {
+          await pc.setRemoteDescription(new RTCSessionDescription(data));
+        }
+      });
+
+      // add callee ICE candidates when they arrive
+      roomRef.child("calleeCandidates").on("child_added", snap => {
+        const cand = snap.val();
+        if (cand) pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.error(e));
+      });
+    };
+
+    // Join room (callee)
+    joinBtn.onclick = async () => {
+      const roomId = roomInput.value.trim();
+      if (!roomId) return alert("Enter Room ID.");
+      if (!localStream) return alert("Local media not ready.");
+
+      const roomRef = db.ref("rooms/" + roomId);
+      const snap = await roomRef.get();
+      if (!snap.exists()) return alert("Room not found.");
+
+      pc = new RTCPeerConnection(servers);
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      pc.ontrack = e => remoteVideo.srcObject = e.streams[0];
+
+      const calleeCandidatesRef = roomRef.child("calleeCandidates");
+      pc.onicecandidate = e => { if (e.candidate) calleeCandidatesRef.push(e.candidate.toJSON()); };
+
+      const roomData = snap.val();
+      if (!roomData.offer) return alert("No offer found in room.");
+
+      await pc.setRemoteDescription(new RTCSessionDescription(roomData.offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await roomRef.update({ answer: pc.localDescription.toJSON() });
+
+      // add caller ICE candidates when they appear
+      roomRef.child("callerCandidates").on("child_added", snap => {
+        const cand = snap.val();
+        if (cand) pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.error(e));
+      });
+    };
+  </script>
+</body>
+</html>
